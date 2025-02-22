@@ -100,7 +100,8 @@ class Field:
                 self.uf.unite((r, c), (r, c + 1))
  
     def is_connected(self, s: Pos, t: Pos) -> bool:
-        assert distance(s, t) > 4  # 前提条件
+        if distance(s, t) > 4:
+            return False
         stations0 = self.collect_stations(s)
         stations1 = self.collect_stations(t)
         for station0 in stations0:
@@ -121,7 +122,6 @@ class Field:
                     stations.append((r, c))
         return stations
  
- 
 class Solver:
     def __init__(self, N: int, M: int, K: int, T: int, home: list[Pos], workplace: list[Pos]):
         self.N = N
@@ -133,45 +133,84 @@ class Solver:
         self.field = Field(N)
         self.money = K
         self.actions = []
- 
+
     def calc_income(self) -> int:
         income = 0
         for i in range(self.M):
             if self.field.is_connected(self.home[i], self.workplace[i]):
                 income += distance(self.home[i], self.workplace[i])
         return income
- 
-    def build_rail(self, type: int, r: int, c: int) -> None:
-        self.field.build(type, r, c)
-        self.money -= COST_RAIL
-        self.actions.append(Action(type, (r, c)))
- 
-    def build_station(self, r: int, c: int) -> None:
+
+    def build_station(self, r: int, c: int) -> Pos:
+        existing_station = self.find_nearest_station((r, c))
+        if existing_station:
+            return existing_station
+
+        if not self.can_afford(COST_STATION):
+            return (r, c)
+
         self.field.build(STATION, r, c)
         self.money -= COST_STATION
         self.actions.append(Action(STATION, (r, c)))
- 
+        return (r, c)
+
+    def build_rail(self, type: int, r: int, c: int) -> None:
+        if not self.can_afford(COST_RAIL):
+            return
+
+        self.field.build(type, r, c)
+        self.money -= COST_RAIL
+        self.actions.append(Action(type, (r, c)))
+
     def build_nothing(self) -> None:
         self.actions.append(Action(DO_NOTHING, (0, 0)))
- 
-    def solve(self) -> Result:
-        # 接続する人を見つける
-        rail_count = (self.K - COST_STATION * 2) // COST_RAIL
-        person_idx = 0
-        while person_idx < self.M:
-            if distance(self.home[person_idx], self.workplace[person_idx]) - 1 <= rail_count:
-                break
-            person_idx += 1
-        assert person_idx != self.M
- 
-        # 駅の配置
-        self.build_station(*self.home[person_idx])
-        self.build_station(*self.workplace[person_idx])
- 
-        # 線路を配置して駅を接続する
-        r0, c0 = self.home[person_idx]
-        r1, c1 = self.workplace[person_idx]
-        # r0 -> r1
+    
+    def find_nearest_station(self, pos: Pos) -> Pos | None:
+        nearest_station = None
+        min_distance = float('inf')
+
+        for dr in range(-2, 3):
+            for dc in range(-2, 3):
+                if abs(dr) + abs(dc) > 2:
+                    continue
+                r, c = pos[0] + dr, pos[1] + dc
+                if 0 <= r < self.N and 0 <= c < self.N and self.field.rail[r][c] == STATION:
+                    d = distance(pos, (r, c))
+                    if d < min_distance:
+                        min_distance = d
+                        nearest_station = (r, c)
+        
+        return nearest_station
+
+    def find_station_sharing_groups(self) -> list[tuple[list[int], Pos]]:
+        station_groups = []
+        for r in range(self.N):
+            for c in range(self.N):
+                shared_passengers = []
+                for i in range(self.M):
+                    if distance(self.home[i], (r, c)) <= 2 or distance(self.workplace[i], (r, c)) <= 2:
+                        shared_passengers.append(i)
+                if len(shared_passengers) >= 2:
+                    station_groups.append((shared_passengers, (r, c)))
+        return station_groups
+
+    def find_longest_distance_pair(self) -> tuple[int, int]:
+        max_distance = -1
+        best_pair = (-1, -1)
+        for i in range(self.M):
+            d = distance(self.home[i], self.workplace[i])
+            if d > max_distance:
+                max_distance = d
+                best_pair = (i, i)
+        return best_pair
+    
+    def can_afford(self, cost: int) -> bool:
+        return self.money >= cost
+
+    def construct_path(self, s: Pos, t: Pos) -> None:
+        r0, c0 = s
+        r1, c1 = t
+
         if r0 < r1:
             for r in range(r0 + 1, r1):
                 self.build_rail(RAIL_VERTICAL, r, c0)
@@ -186,25 +225,85 @@ class Solver:
                 self.build_rail(RAIL_RIGHT_DOWN, r1, c0)
             elif c0 > c1:
                 self.build_rail(RAIL_LEFT_DOWN, r1, c0)
-        # c0 -> c1
+
         if c0 < c1:
             for c in range(c0 + 1, c1):
                 self.build_rail(RAIL_HORIZONTAL, r1, c)
         elif c0 > c1:
             for c in range(c0 - 1, c1, -1):
                 self.build_rail(RAIL_HORIZONTAL, r1, c)
- 
-        income = self.calc_income()
-        self.money += income
- 
-        # あとは待機
+
+    def solve(self) -> Result:
+        station_groups = self.find_station_sharing_groups()
+        best_group = None
+        best_profit = 0
+
+        for group, station_pos in station_groups:
+            shared_count = len(group)
+            max_distance = max(distance(self.home[i], self.workplace[i]) for i in group)
+            budget_check = (self.money - 10000) // 100 > (self.T - len(self.actions)) * max_distance * shared_count
+
+            if budget_check and shared_count > best_profit:
+                best_profit = shared_count
+                best_group = (group, station_pos)
+
+        if best_group:
+            group, station_pos = best_group
+            station_pos = self.build_station(*station_pos)
+
+            for i in group[:2]:
+                home_station = self.build_station(*self.home[i])
+                self.construct_path(self.home[i], station_pos)
+                workplace_station = self.build_station(*self.workplace[i])
+                self.construct_path(station_pos, workplace_station)
+
+            income = self.calc_income()
+            self.money += income
+            while len(self.actions) < self.T:
+                self.build_nothing()
+                self.money += income
+            return Result(self.actions, self.money)
+
+        if self.money >= 17000:
+            for group, station_pos in station_groups:
+                if len(group) >= 2:
+                    first, second = group[:2]
+                    station_pos = self.build_station(*station_pos)
+
+                    home_station_first = self.build_station(*self.home[first])
+                    self.construct_path(home_station_first, station_pos)
+                    workplace_station_first = self.build_station(*self.workplace[first])
+                    self.construct_path(station_pos, workplace_station_first)
+
+                    if self.money >= COST_STATION + COST_RAIL * 5:
+                        workplace_station_second = self.build_station(*self.workplace[second])
+                        self.construct_path(station_pos, workplace_station_second)
+
+                    income = self.calc_income()
+                    self.money += income
+                    while len(self.actions) < self.T:
+                        self.build_nothing()
+                        self.money += income
+                    return Result(self.actions, self.money)
+
+        i, _ = self.find_longest_distance_pair()
+        if i != -1 and (self.money - 10000) // 100 > distance(self.home[i], self.workplace[i]):
+            home_station = self.build_station(*self.home[i])
+            workplace_station = self.build_station(*self.workplace[i])
+            self.construct_path(home_station, workplace_station)
+
+            income = self.calc_income()
+            self.money += income
+            while len(self.actions) < self.T:
+                self.build_nothing()
+                self.money += income
+            return Result(self.actions, self.money)
+
         while len(self.actions) < self.T:
             self.build_nothing()
-            self.money += income
- 
+
         return Result(self.actions, self.money)
- 
- 
+
 def main():
     N, M, K, T = map(int, input().split())
     home = []
@@ -217,8 +316,7 @@ def main():
     solver = Solver(N, M, K, T, home, workplace)
     result = solver.solve()
     print(result)
-    print(f"score={result.score}", file=sys.stderr)
- 
+    #print(f"score={result.score}", file=sys.stderr)
  
 if __name__ == "__main__":
     main()
