@@ -53,3 +53,8 @@
 ### https://atcoder.jp/contests/abc394
 
     キーでソート
+
+
+### https://atcoder.jp/contests/abc395
+
+    体調不良
